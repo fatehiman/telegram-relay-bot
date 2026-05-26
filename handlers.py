@@ -711,7 +711,24 @@ async def _poll_chat_reactions(client: TelegramClient, db: DB, chat_id: int,
         cp = await db.get_relay_counterpart(chat_id, m.id)
         if not cp:
             continue
-        other_chat, other_msg, _src_side = cp
+        other_chat, other_msg, src_side = cp
+        # ASYMMETRIC MIRRORING: only propagate reactions when the polled
+        # message is on the TARGET (b_*) side of the relay — i.e. it is
+        # R's outgoing relay, and the partner is reacting to "the bot's
+        # message". The mirror then lands on the original sender's OWN
+        # outgoing on the other side, which looks natural in their UI
+        # ("someone reacted to my msg").
+        #
+        # When the polled message is the SOURCE (a_*) — the user's own
+        # outgoing — mirroring would make R react to its OWN outgoing
+        # relay on the other side, which looks bizarre to the partner
+        # ("the bot is reacting to its own messages"). So we skip and
+        # let the source user's reaction stay local to their view. This
+        # matches how reactions naturally flow in a direct chat: you
+        # only ever see the OTHER person's reactions to YOUR own msgs,
+        # never their reactions to their own msgs.
+        if src_side:
+            continue
         try:
             target_entity = await client.get_input_entity(other_chat)
             await client(SendReactionRequest(
