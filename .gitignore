@@ -1,0 +1,10 @@
+.env
+*.session
+*.session-journal
+telbot.db
+msg/
+__pycache__/
+*.pyc
+.venv/
+venv/
+playwright_out/

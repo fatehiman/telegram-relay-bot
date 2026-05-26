@@ -1,0 +1,75 @@
+# ============================================================================
+# pair-accounts.txt — bidirectional middleman pair definitions
+# ----------------------------------------------------------------------------
+# This file is re-read on every incoming Telegram message. Edits take effect
+# immediately, no app restart needed.
+#
+# SYNTAX
+#   [global-flags]<sender>[side-flags] = <target>[side-flags]
+#
+#   - Each side is a Telegram @username (with or without @) or a numeric
+#     user id. The mapping is always bidirectional: a line "A = B" means
+#     messages from A are relayed to B AND messages from B are relayed to A.
+#   - Flags are inside square brackets, no spaces, case-insensitive.
+#     [d], [p], [dp], [d][p] all parse the same.
+#   - Global flags (at the very start of the line) apply to both directions.
+#   - Side flags (right after a username) apply only when THAT user is the
+#     sender (i.e. only when their message is being relayed onward).
+#   - Relay only fires in private 1-on-1 chats; groups and channels never
+#     trigger pair-based relay.
+#
+# FLAGS
+#   d   Disabled. Pair is skipped entirely. Bidirectional only — use at line
+#       start. The AI safety check sets this automatically when a message
+#       violates stop-relay-rules.txt. Remove [d] manually to re-enable.
+#   p   Polish. Pass this side's outgoing-relay message through DeepSeek to
+#       rewrite it for clarity/tone before sending. Can be global (both
+#       sides polished) or per-side.
+#   i   Ignore safety rules. Skip the AI check against stop-relay-rules.txt
+#       for this pair — every message is relayed (subject to other flags).
+#       Bidirectional only — use at line start.
+#
+# SAMPLES
+#   alice = bob
+#       Plain relay in both directions. Each message runs through the safety
+#       check first; if safe, marked as seen, then sent.
+#
+#   alice[p] = bob
+#       Polish alice's messages before relaying them to bob. Bob's messages
+#       are relayed to alice unchanged.
+#
+#   alice = bob[p]
+#       Polish bob's messages before relaying them to alice.
+#
+#   [p]alice = bob
+#       Polish both directions.
+#
+#   alice[p] = bob[p]
+#       Polish both directions (equivalent to [p]alice = bob).
+#
+#   [d]alice = bob
+#       Pair disabled. Nothing relays until [d] is removed.
+#
+#   [i]alice = bob
+#       Skip safety check for this pair. Every message relayed without filtering.
+#
+#   [i]alice[p] = bob
+#       Skip safety check AND polish alice's messages before relaying.
+#
+#   [d]alice[p] = bob[p]
+#       Currently disabled; polish flags will apply once [d] is removed.
+#
+#   123456789 = @bob
+#       Numeric user id on the left, username on the right.
+#
+# NOTES
+#   - Lines starting with '#' are comments and ignored.
+#   - Blank lines are ignored.
+#   - Trailing comments on a data line are NOT supported.
+#   - Unknown flag letters are warned in logs and ignored.
+#   - 'd' or 'i' on a single side is ignored with a warning — use global form.
+#   - Whitespace around '=' is tolerated.
+# ============================================================================
+
+Kimiasoftco[p]=fatehiman
+[i]Kimiasoftco[p]=rahelehkiani

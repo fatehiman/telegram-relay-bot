@@ -1,0 +1,55 @@
+# Per-account / per-chat behavior. First matching rule wins; its actions
+# override the defaults below. If no rule matches, defaults alone apply.
+#
+# Match fields (all optional; combine for AND):
+#   chat_type:        private | group | megagroup | channel
+#   chat_id:          int or list[int]   (Telegram numeric chat id)
+#   from_user:        "@username" or numeric id, or list of either
+#   text_regex:       Python regex against message text (case-insensitive)
+#   chat_title_regex: regex against chat/user display name
+#
+# Action fields:
+#   save:                  bool   — persist to SQLite (default: true)
+#   analyze:               bool   — run DeepSeek analysis (default: true)
+#   analyze_system_prompt: str    — overrides default analysis prompt
+#   auto_reply:
+#     enabled:             bool
+#     system_prompt:       str
+#     temperature:         float (default 0.4)
+#     max_tokens:          int   (default 300)
+#   relay_to:              "@user" / numeric id  — forward a rendered message
+#   relay_template:        str   — supports {sender_name} {sender_username}
+#                                  {chat_title} {chat_id} {text}
+
+defaults:
+  save: true
+  analyze: true
+
+rules:
+  # Example: skip analysis for noisy news channels (still save them).
+  - name: news-channels-save-only
+    match:
+      chat_type: channel
+    actions:
+      analyze: false
+
+  # Example: auto-reply on a specific 1-on-1 chat.
+  # - name: friend-andrei-auto-reply
+  #   match:
+  #     chat_type: private
+  #     from_user: "@andrei_example"
+  #   actions:
+  #     auto_reply:
+  #       enabled: true
+  #       system_prompt: |
+  #         You are replying on behalf of the account owner. Keep replies short
+  #         (one or two sentences), in the same language as the incoming message.
+  #         Never make promises or share personal info.
+
+  # Example: relay messages from a specific user to another chat.
+  # - name: relay-from-boss
+  #   match:
+  #     from_user: 123456789
+  #   actions:
+  #     relay_to: "@my_other_handle"
+  #     relay_template: "[from {sender_name}] {text}"

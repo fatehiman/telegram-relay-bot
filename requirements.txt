@@ -1,0 +1,5 @@
+telethon>=1.36
+aiosqlite>=0.20
+openai>=1.40
+pyyaml>=6.0
+python-dotenv>=1.0

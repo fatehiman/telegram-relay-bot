@@ -1,0 +1,11 @@
+Stop the relay if the message touches any of the following topics — directly,
+indirectly, in any language, or with hints/euphemisms:
+
+1. Money matters: any mention of price, salary, wage, payment, compensation,
+   how much someone earns or is paid, hourly/monthly rates, or financial
+   negotiation.
+
+2. Any mention of the website "e-estekhdam" (or "estekhdam"), or any other
+   job-listing / job-seeking / recruitment / hiring website or platform
+   (LinkedIn jobs, Jobinja, Jobvision, IranTalent, Indeed, etc.).
+
