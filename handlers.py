@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telethon import TelegramClient, events, utils
-from telethon.errors import MessageNotModifiedError
+from telethon.errors import MessageNotModifiedError, ReactionsTooManyError
 from telethon.tl.functions.messages import SendReactionRequest, SetTypingRequest
 from telethon.tl.types import (
     Channel, Chat, InputReplyToMessage,
@@ -623,8 +623,12 @@ REACTION_POLL_JITTER = 2.0              # ± seconds added to each sleep so the
                                         # fingerprint
 REACTION_POLL_LOOKBACK_HOURS = 24       # only re-poll relays from the last 24h
 REACTION_POLL_PER_CHAT_LIMIT = 100      # cap msgs per get_messages call
-REACTION_PAIR_IDLE_THRESHOLD = 5.0      # seconds; pair must have had activity
-                                        # within this window to be polled
+REACTION_PAIR_IDLE_THRESHOLD = 60.0     # seconds; pair must have had activity
+                                        # within this window to be polled.
+                                        # Was 5s originally, but with a 10s
+                                        # poll interval most reactions land
+                                        # 10-60s after the message and got
+                                        # missed by a too-tight window.
 REACTION_GLOBAL_IDLE_THRESHOLD = 300.0  # seconds; once EVERY chat has been
                                         # idle this long the loop skips its
                                         # API calls entirely (still wakes on
@@ -719,6 +723,21 @@ async def _poll_chat_reactions(client: TelegramClient, db: DB, chat_id: int,
             ))
             log.info("reaction (poll): chat=%s msg=%s -> chat=%s msg=%s count=%d",
                      chat_id, m.id, other_chat, other_msg, len(partner))
+        except MessageNotModifiedError:
+            # Target already in the reaction state we'd set. Happens after a
+            # restart (in-memory state lost; first cycle re-sends what's
+            # already in sync), or when two poll cycles race to mirror the
+            # same change. Treat as success — `state[key]` was already
+            # written above, so we won't retry next cycle.
+            log.debug("reaction in-sync (target already matches): "
+                      "chat=%s msg=%s", other_chat, other_msg)
+        except ReactionsTooManyError:
+            # The target message has reached `reactions_uniq_max` distinct
+            # reactions (free user accounts cap at 1, premium at 3). We
+            # can't add ours. Mark as "handled" so we don't log a stack
+            # every cycle for this msg.
+            log.warning("reaction cap reached: chat=%s msg=%s — partner's "
+                        "set will not be mirrored here", other_chat, other_msg)
         except Exception:
             log.exception("reaction propagation failed (chat=%s msg=%s)",
                           other_chat, other_msg)
