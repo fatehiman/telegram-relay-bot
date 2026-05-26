@@ -138,6 +138,10 @@ def register(client: TelegramClient, db: DB, ai: DeepSeek,
             log.exception("failed to build ctx")
             return
 
+        # Mark this chat as active so the reaction-polling loop knows to
+        # include it in upcoming cycles.
+        mark_chat_active(ctx["chat_id"])
+
         actions = resolve(rules_cfg, ctx)
         log.info(
             "msg chat=%s(%s) from=%s text=%r rule=%s",
@@ -320,6 +324,10 @@ def register(client: TelegramClient, db: DB, ai: DeepSeek,
         user_id = update.user_id
         action = update.action
 
+        # Typing in a private chat counts as activity on that chat (chat_id
+        # == user_id for private chats from the bot's perspective).
+        mark_chat_active(user_id)
+
         pairs = load_pairs(pairs_path)
         if not pairs:
             return
@@ -362,6 +370,10 @@ def register(client: TelegramClient, db: DB, ai: DeepSeek,
             log.exception("failed to derive chat_id from outbox-read update")
             return
         max_id = update.max_id
+
+        # The other side opening their chat is a clear "they're online right
+        # now" signal — likely to be followed by a reaction.
+        mark_chat_active(chat_id)
 
         row = await db.find_latest_relay_in_chat(chat_id, max_id)
         if not row:
@@ -565,6 +577,11 @@ async def _maybe_pair_relay(client: TelegramClient, db: DB, ai: DeepSeek,
                                     target_chat_id, sent.id)
         except Exception:
             log.exception("save_relay_map failed (relay still sent)")
+        # Both chats just had activity (source: sender; target: a new msg
+        # landed there). Either side may add a reaction in the next few
+        # seconds, so flag both for the reaction-polling loop.
+        mark_chat_active(ctx["chat_id"])
+        mark_chat_active(target_chat_id)
         if msg_db_id is not None:
             await db.save_action(msg_db_id, "pair_relay", str(target), stored, "sent")
     except Exception as e:
@@ -600,9 +617,35 @@ async def _delayed_mark_read(client: TelegramClient, chat_id: int,
 # messages on a timer instead. Reference: Telegram core docs at
 # https://core.telegram.org/api/reactions plus empirical confirmation.
 
-REACTION_POLL_INTERVAL = 10.0       # seconds between poll cycles
-REACTION_POLL_LOOKBACK_HOURS = 24   # only re-poll relays from the last 24h
-REACTION_POLL_PER_CHAT_LIMIT = 100  # cap msgs per get_messages call
+REACTION_POLL_INTERVAL = 10.0           # seconds between poll cycles
+REACTION_POLL_JITTER = 2.0              # ± seconds added to each sleep so the
+                                        # call cadence isn't a perfect periodic
+                                        # fingerprint
+REACTION_POLL_LOOKBACK_HOURS = 24       # only re-poll relays from the last 24h
+REACTION_POLL_PER_CHAT_LIMIT = 100      # cap msgs per get_messages call
+REACTION_PAIR_IDLE_THRESHOLD = 5.0      # seconds; pair must have had activity
+                                        # within this window to be polled
+REACTION_GLOBAL_IDLE_THRESHOLD = 300.0  # seconds; once EVERY chat has been
+                                        # idle this long the loop skips its
+                                        # API calls entirely (still wakes on
+                                        # the next interval to re-check)
+REACTION_GLOBAL_IDLE_SLEEP = 30.0       # seconds; longer sleep while fully
+                                        # idle, to drop API load to zero
+
+# Module-level dict tracking the last-seen activity timestamp per chat_id.
+# A chat is "active" when ANY observable event (incoming message, typing
+# action, outbox read, or a relay we just sent INTO that chat) happens on
+# it. The reaction-polling loop consults this dict to decide which chats to
+# include in the next get_messages batch.
+_chat_activity: dict[int, float] = {}
+
+
+def mark_chat_active(chat_id: int) -> None:
+    """Record observable activity in `chat_id`. Used by the reaction-polling
+    loop to gate which chats it queries. Safe to call from anywhere; this is
+    a plain dict assignment under the asyncio event-loop thread."""
+    if chat_id is not None:
+        _chat_activity[chat_id] = time.time()
 
 
 def _extract_partner_reactions(reactions) -> list:
@@ -681,35 +724,65 @@ async def _poll_chat_reactions(client: TelegramClient, db: DB, chat_id: int,
                           other_chat, other_msg)
 
 
+def _next_sleep(base: float, jitter: float) -> float:
+    """Compute a sleep interval with ±jitter so call timing doesn't form a
+    perfectly periodic fingerprint."""
+    return max(0.0, base + random.uniform(-jitter, jitter))
+
+
 async def _reaction_poll_loop(client: TelegramClient, db: DB) -> None:
-    log.info("reaction polling started (interval=%ss, lookback=%sh)",
-             REACTION_POLL_INTERVAL, REACTION_POLL_LOOKBACK_HOURS)
+    log.info("reaction polling started (interval=%.0fs±%.0fs, pair-idle=%.0fs, "
+             "global-idle=%.0fs, lookback=%dh)",
+             REACTION_POLL_INTERVAL, REACTION_POLL_JITTER,
+             REACTION_PAIR_IDLE_THRESHOLD, REACTION_GLOBAL_IDLE_THRESHOLD,
+             REACTION_POLL_LOOKBACK_HOURS)
     state: dict[tuple[int, int], tuple] = {}
     while True:
         try:
-            since = int(time.time()) - REACTION_POLL_LOOKBACK_HOURS * 3600
-            rows = await db.get_recent_relay_rows(since)
-            # Group msgs by chat so each chat needs at most one
-            # get_messages call per cycle. Both sides of every relay are
-            # candidates: the source side (where the partner can react to
-            # their own message), and the target side (where the partner
-            # can react to the bot's relayed copy of the OTHER party's
-            # message).
-            by_chat: dict[int, list[int]] = {}
-            for a_chat, a_msg, b_chat, b_msg in rows:
-                by_chat.setdefault(a_chat, []).append(a_msg)
-                by_chat.setdefault(b_chat, []).append(b_msg)
-            for chat_id, msg_ids in by_chat.items():
-                # Deduplicate and cap so each call stays within Telegram's
-                # 100-ids-per-request batch limit.
-                unique = sorted(set(msg_ids), reverse=True)[:REACTION_POLL_PER_CHAT_LIMIT]
-                await _poll_chat_reactions(client, db, chat_id, unique, state)
+            now = time.time()
+
+            # Global-idle gate: if nothing anywhere has shown activity in
+            # the last REACTION_GLOBAL_IDLE_THRESHOLD seconds, skip ALL
+            # API calls this cycle and sleep longer. Resumes naturally as
+            # soon as any handler calls mark_chat_active().
+            latest = max(_chat_activity.values()) if _chat_activity else 0.0
+            if latest and (now - latest) > REACTION_GLOBAL_IDLE_THRESHOLD:
+                log.debug("reaction polling fully idle (%.0fs since last "
+                          "activity) — skipping cycle",
+                          now - latest)
+                await asyncio.sleep(_next_sleep(REACTION_GLOBAL_IDLE_SLEEP,
+                                                REACTION_POLL_JITTER))
+                continue
+
+            # Per-pair gate: only consider chats that had activity in the
+            # last REACTION_PAIR_IDLE_THRESHOLD seconds. This is the main
+            # API-load reducer — quiet pairs contribute zero traffic.
+            active_chats = {
+                cid for cid, ts in _chat_activity.items()
+                if (now - ts) <= REACTION_PAIR_IDLE_THRESHOLD
+            }
+            if active_chats:
+                since = int(now) - REACTION_POLL_LOOKBACK_HOURS * 3600
+                rows = await db.get_recent_relay_rows(since)
+                # Group msgs by chat so each chat needs at most one
+                # get_messages call per cycle. Filter both sides by the
+                # activity-gated set.
+                by_chat: dict[int, list[int]] = {}
+                for a_chat, a_msg, b_chat, b_msg in rows:
+                    if a_chat in active_chats:
+                        by_chat.setdefault(a_chat, []).append(a_msg)
+                    if b_chat in active_chats:
+                        by_chat.setdefault(b_chat, []).append(b_msg)
+                for chat_id, msg_ids in by_chat.items():
+                    unique = sorted(set(msg_ids), reverse=True)[:REACTION_POLL_PER_CHAT_LIMIT]
+                    await _poll_chat_reactions(client, db, chat_id, unique, state)
         except asyncio.CancelledError:
             log.info("reaction polling cancelled")
             return
         except Exception:
             log.exception("reaction poll loop iteration failed")
-        await asyncio.sleep(REACTION_POLL_INTERVAL)
+        await asyncio.sleep(_next_sleep(REACTION_POLL_INTERVAL,
+                                        REACTION_POLL_JITTER))
 
 
 def start_reaction_polling(client: TelegramClient, db: DB) -> asyncio.Task:
