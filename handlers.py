@@ -22,7 +22,7 @@ from config import Delays
 from db import DB
 from deepseek import DeepSeek
 from pairs import disable_pair, load_pairs, resolve_pair
-from polish import load_polish_prompt, polish
+from polish import load_polish_prompt, normalize_ai_output, polish
 from rules import resolve
 from safety import is_safe_to_relay, load_rules_text
 
@@ -203,7 +203,7 @@ def register(client: TelegramClient, db: DB, ai: DeepSeek,
             try:
                 payload = _format_relay(actions.get("relay_template") or "{text}", ctx)
                 target = int(relay_to) if str(relay_to).lstrip("-").isdigit() else relay_to
-                await client.send_message(target, payload)
+                await client.send_message(target, payload, link_preview=False)
                 await db.save_action(msg_db_id, "relay", str(relay_to), payload, "sent")
             except Exception as e:
                 log.exception("rule relay failed")
@@ -267,15 +267,18 @@ def register(client: TelegramClient, db: DB, ai: DeepSeek,
             polish_prompt = load_polish_prompt(polish_prompt_path)
             polished, perr = await polish(ai, polish_prompt, text)
             if perr:
+                # DeepSeek didn't respond — propagate the exact original edit.
                 log.warning("polish failed on edit (%s); using original", perr)
+                text_to_send = text
             else:
-                text_to_send = polished
+                text_to_send = normalize_ai_output(polished)
 
         # For media without caption there's nothing meaningful to edit; skip.
         if has_media and not text_to_send:
             return
         try:
-            await client.edit_message(other_chat, other_msg, text=text_to_send)
+            await client.edit_message(other_chat, other_msg, text=text_to_send,
+                                      link_preview=False)
             log.info("pair edit propagated: %s -> chat=%s msg=%s",
                      sender_id, other_chat, other_msg)
         except MessageNotModifiedError:
@@ -496,12 +499,15 @@ async def _maybe_pair_relay(client: TelegramClient, db: DB, ai: DeepSeek,
         polish_prompt = load_polish_prompt(polish_prompt_path)
         polished, perr = await polish(ai, polish_prompt, text)
         if perr:
+            # DeepSeek didn't respond — relay the exact original message.
             log.warning("polish failed for %s -> %s (%s); sending original",
                         sender_id, target, perr)
+            text_to_send = text
         else:
+            # DeepSeek responded — apply cosmetic normalization.
+            text_to_send = normalize_ai_output(polished)
             log.info("polished %s -> %s: %r -> %r",
-                     sender_id, target, text[:60], polished[:60])
-        text_to_send = polished
+                     sender_id, target, text[:60], text_to_send[:60])
 
     # Resolve the target entity once. We need its canonical chat_id both
     # to record the relay_map entry and to validate any reply_to lookup
@@ -566,8 +572,12 @@ async def _maybe_pair_relay(client: TelegramClient, db: DB, ai: DeepSeek,
                      target, (text_to_send or "")[:80], ttl)
             stored = text_to_send if text_to_send else "[media]"
         else:
+            # link_preview=False: messages containing a URL otherwise trigger
+            # Telegram's web-page preview, which can fail the whole send (and
+            # thus drop the relay). Disable previews entirely.
             sent = await client.send_message(target_entity, text_to_send,
-                                             reply_to=reply_to)
+                                             reply_to=reply_to,
+                                             link_preview=False)
             log.info("pair relayed to %s: %r", target, text_to_send[:80])
             stored = text_to_send
         # Record the source -> target mapping so future edits/deletes/pins/

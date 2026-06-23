@@ -71,5 +71,6 @@
 #   - Whitespace around '=' is tolerated.
 # ============================================================================
 
-Kimiasoftco[p]=fatehiman
-[i]Kimiasoftco[p]=rahelehkiani
+Fatehiman[p]=Rahelehkiani
+#[i]Kimiasoftco[p]=vdavictor
+#peppasoft[p]=Rahelehkiani
